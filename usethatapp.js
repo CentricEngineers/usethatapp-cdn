@@ -5,7 +5,7 @@
 (function () {
     'use strict';
 
-    const parentOrigin = "http://localhost:8000"; // Update to match the trusted parent origin
+    const parentOrigin = "http://localhost:8000"; // TODO: Update to www.usethatapp.com in production
 
     // Restore handshake flag from sessionStorage (persists across same-origin iframe navigations)
     let handshakeComplete = sessionStorage.getItem('handshakeComplete') === '1';
@@ -19,6 +19,80 @@
         handshakeComplete = false;
         sessionStorage.removeItem('handshakeComplete');
     }
+
+    /**
+     * Top-level function to request access level from the parent.
+     * Exposed as `window.requestAccessLevel` for non-Dash consumers and also kept
+     * available under `window.dash_clientside.clientside.requestAccessLevel`.
+     */
+    async function requestAccessLevel(...args) {
+        // If the handshake hasn't completed yet, do not attempt the request.
+        // Dash expects window.dash_clientside.no_update for no change.
+        var NO_UPDATE = (window.dash_clientside && window.dash_clientside.no_update) ? window.dash_clientside.no_update : undefined;
+        if (!handshakeComplete) {
+            return NO_UPDATE;
+        }
+
+        const timeout = 10000; // milliseconds
+        const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+        return new Promise((resolve, reject) => {
+            let timeoutId = null;
+
+            function cleanup() {
+                window.removeEventListener('message', onMessage, false);
+                if (timeoutId !== null) {
+                    clearTimeout(timeoutId);
+                    timeoutId = null;
+                }
+            }
+
+            function onMessage(event) {
+                if (event.origin !== parentOrigin) {
+                    return; // ignore other origins
+                }
+
+                const msg = event.data || {};
+
+                // Only act on responses that explicitly reference our request id.
+                // Ignore unrelated messages instead of rejecting.
+                if (msg.responseTo === requestId) {
+                    cleanup();
+                    resolve(msg);
+                }
+            }
+
+            // Listen for the parent's response
+            window.addEventListener('message', onMessage, false);
+
+            // Send request with correlation id
+            try {
+                window.parent.postMessage({
+                    type: 'request-level',
+                    requestId: requestId
+                }, parentOrigin);
+            } catch (err) {
+                cleanup();
+                return reject(err);
+            }
+
+            // Timeout handling
+            timeoutId = setTimeout(() => {
+                cleanup();
+                reject(new Error('requestAccessLevel timed out'));
+            }, timeout);
+        });
+    }
+
+    // Make the function available globally
+    window.requestAccessLevel = requestAccessLevel;
+
+    // Also keep it accessible for Dash clients
+    window.dash_clientside = Object.assign({}, window.dash_clientside, {
+        clientside: Object.assign({}, (window.dash_clientside && window.dash_clientside.clientside) || {}, {
+            requestAccessLevel: requestAccessLevel
+        })
+    });
 
     /**
      * Responds to messages from the parent window.
@@ -49,65 +123,8 @@
         }
     }
 
-    // Expose a Dash clientside function that requests access level from the parent.
-    // Attach it to window.dash_clientside.clientside.requestAccessLevel
-    window.dash_clientside = Object.assign({}, window.dash_clientside, {
-        clientside: {
-            requestAccessLevel: async function (...args) {
-                const timeout = 10000; // milliseconds
-
-                if (!handshakeComplete) {
-                    return Promise.reject(new Error('handshake not complete'));
-                }
-
-                const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-                return new Promise((resolve, reject) => {
-                    let timeoutId = null;
-
-                    function onMessage(event) {
-                        if (event.origin !== parentOrigin) {
-                            return;
-                        }
-
-                        const msg = event.data || {};
-                        // Match responses that explicitly reference our request id
-                        if (msg.responseTo === requestId) {
-                            window.removeEventListener('message', onMessage, false);
-                            if (timeoutId !== null) {
-                                clearTimeout(timeoutId);
-                            }
-                            resolve(msg);
-                        } else {
-                            reject(new Error('requestId does not match'));
-                        }
-                    }
-
-                    // Listen for the parent's response
-                    window.addEventListener('message', onMessage, false);
-
-                    // Send request with correlation id
-                    try {
-                        window.parent.postMessage({
-                            type: 'request-level',
-                            requestId: requestId
-                        }, parentOrigin);
-                    } catch (err) {
-                        window.removeEventListener('message', onMessage, false);
-                        return reject(err);
-                    }
-
-                    // Timeout handling
-                    timeoutId = setTimeout(() => {
-                        window.removeEventListener('message', onMessage, false);
-                        reject(new Error('requestAccessLevel timed out'));
-                    }, timeout);
-                });
-            }
-        }
-    });
-
-    // Listen for messages from parent
+    // Listen for messages from parent (handshake + cleared explicitly by parent)
+    // Add once at module init so we don't create duplicates on repeated calls
     window.addEventListener('message', handleHandshakeMessage, false);
 
     // Throttle resize notifications to avoid rapid firing
@@ -142,12 +159,6 @@
         }
     }
 
-    // Ensure the handshake flag is cleared when this browsing context unloads
-    window.addEventListener('beforeunload', () => {
-        clearHandshake();
-    }, false);
-
-    window.addEventListener('pagehide', () => {
-        clearHandshake();
-    }, false);
+    // NOTE: do not clear the handshake on unload/pagehide here.
+    // The parent can explicitly send `clear-handshake` when it wants the child to drop the flag.
 })();
