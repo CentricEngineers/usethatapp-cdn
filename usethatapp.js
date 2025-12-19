@@ -53,7 +53,9 @@
     // Attach it to window.dash_clientside.clientside.requestAccessLevel
     window.dash_clientside = Object.assign({}, window.dash_clientside, {
         clientside: {
-            requestAccessLevel: async function (n_clicks, timeout = 10000) {
+            requestAccessLevel: async function (...args) {
+                const timeout = 10000; // milliseconds
+
                 if (!handshakeComplete) {
                     return Promise.reject(new Error('handshake not complete'));
                 }
